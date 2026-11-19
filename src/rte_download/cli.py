@@ -12,9 +12,9 @@ from .core import RteDownloadError, download_with_ytdlp, resolve_stream
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rte-download",
-        description="Download videos from RTÉ Archives.",
+        description="Download videos from RTÉ Archives and RTÉ News.",
     )
-    parser.add_argument("url", help="RTÉ Archives page URL")
+    parser.add_argument("url", help="RTÉ Archives or RTÉ News page URL")
     parser.add_argument(
         "-o",
         "--output-dir",
@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Increase logging verbosity.",
     )
+    parser.add_argument("--clip-id", help="Select a clip by ID on an RTÉ News article.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -58,13 +59,39 @@ def configure_logging(verbosity: int) -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
+def choose_clip(clips: tuple[tuple[str, str], ...]) -> str:
+    print("This article contains multiple clips.", file=sys.stderr)
+    for number, (clip_id, title) in enumerate(clips, start=1):
+        label = f"{title} [{clip_id}]" if title else clip_id
+        print(f"  {number}. {label}", file=sys.stderr)
+
+    if not sys.stdin.isatty():
+        raise RteDownloadError("Run again with --clip-id and one of the IDs above.")
+
+    while True:
+        print(f"Select a clip (1–{len(clips)}): ", end="", file=sys.stderr, flush=True)
+        try:
+            selection = int(input())
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise RteDownloadError("Clip selection cancelled.") from exc
+        except ValueError:
+            continue
+        if 1 <= selection <= len(clips):
+            return clips[selection - 1][0]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
 
     try:
-        stream = resolve_stream(args.url, filename_template=args.filename_template)
+        stream = resolve_stream(
+            args.url,
+            filename_template=args.filename_template,
+            clip_id=args.clip_id,
+            select_clip=choose_clip,
+        )
     except RteDownloadError as exc:
         print(f"rte-download: {exc}", file=sys.stderr)
         return 1

@@ -14,12 +14,13 @@ from typing import Any, Callable, Iterable
 
 LOG = logging.getLogger(__name__)
 
+NEWS_PLAYLIST_URL = "https://www.rte.ie/rteavgen/getplaylist/?format=json&id={id}"
 GETPLAYLIST_URL = "https://www.rte.ie/rteavgen/getplaylist/?id={id}"
 USER_AGENT = "Mozilla/5.0 (compatible; rte-download/0.1)"
 
 
 class RteDownloadError(RuntimeError):
-    """Raised when an RTÉ archive video cannot be resolved or downloaded."""
+    """Raised when an RTÉ video cannot be resolved or downloaded."""
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class PageInfo:
     player_ids: tuple[str, ...]
     title: str
     date: str | None
+    news_clips: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,11 +49,18 @@ class MetadataParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.meta: dict[str, str] = {}
         self.iframes: list[str] = []
+        self.news_clips: dict[str, str] = {}
         self.title_parts: list[str] = []
         self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        clip_id = attrs_dict.get("data-id", "").strip()
+        if attrs_dict.get("data-embed") == "rte-player" and re.fullmatch(r"[0-9]+", clip_id):
+            label = first_non_empty(attrs_dict.get("data-title"), attrs_dict.get("alt"))
+            if clip_id not in self.news_clips or label:
+                self.news_clips[clip_id] = clean_text(label) if label else ""
+
         if tag.lower() == "meta":
             key = attrs_dict.get("name") or attrs_dict.get("property")
             content = attrs_dict.get("content")
@@ -86,7 +95,8 @@ def parse_page(url: str, html_text: str) -> PageInfo:
     parser.feed(html_text)
 
     archive_id = extract_archive_id(url, parser.meta)
-    player_ids = unique_ids(
+    is_news = urllib.parse.urlparse(url).path.startswith("/news/")
+    player_ids = list(parser.news_clips) if is_news else unique_ids(
         [
             *extract_url_ids(url),
             *extract_avms_ids(parser.meta),
@@ -112,6 +122,7 @@ def parse_page(url: str, html_text: str) -> PageInfo:
         player_ids=tuple(player_ids),
         title=clean_text(title),
         date=date,
+        news_clips=tuple(parser.news_clips.items()) if is_news else (),
     )
 
 
@@ -164,8 +175,10 @@ def extract_getplaylist_ids(text: str) -> list[str]:
     return unique_ids(ids)
 
 
-def fetch_playlist(playlist_id: str, fetch: Callable[[str], str] = fetch_text) -> dict[str, Any]:
-    url = GETPLAYLIST_URL.format(id=playlist_id)
+def fetch_playlist(
+    playlist_id: str, fetch: Callable[[str], str] = fetch_text, *, news: bool = False
+) -> dict[str, Any]:
+    url = (NEWS_PLAYLIST_URL if news else GETPLAYLIST_URL).format(id=playlist_id)
     LOG.info("Fetching RTÉ playlist %s", url)
     return json.loads(fetch(url))
 
@@ -174,6 +187,9 @@ def resolve_stream(
     url: str,
     fetch: Callable[[str], str] = fetch_text,
     filename_template: str = "{date} - {title} [{id}]",
+    *,
+    clip_id: str | None = None,
+    select_clip: Callable[[tuple[tuple[str, str], ...]], str] | None = None,
 ) -> StreamInfo:
     page_html = fetch(url)
     page = parse_page(url, page_html)
@@ -181,12 +197,21 @@ def resolve_stream(
     if not page.player_ids:
         raise RteDownloadError("Could not find an RTÉ archive or player ID on the page.")
 
-    LOG.debug("Candidate player IDs: %s", ", ".join(page.player_ids))
+    player_ids = page.player_ids
+    if clip_id is None and len(page.news_clips) > 1 and select_clip is not None:
+        clip_id = select_clip(page.news_clips)
+    if clip_id is not None:
+        if clip_id not in dict(page.news_clips):
+            raise RteDownloadError(f"Clip ID {clip_id} was not found on this RTÉ News article.")
+        player_ids = (clip_id,)
+
+    news = bool(page.news_clips)
+    LOG.debug("Candidate player IDs: %s", ", ".join(player_ids))
     last_error: Exception | None = None
 
-    for playlist_id in page.player_ids:
+    for playlist_id in player_ids:
         try:
-            playlist = fetch_playlist(playlist_id, fetch=fetch)
+            playlist = fetch_playlist(playlist_id, fetch=fetch, news=news)
             stream_url = find_hls_stream_url(playlist)
         except Exception as exc:
             LOG.debug("Playlist ID %s did not resolve: %s", playlist_id, exc)
@@ -197,14 +222,15 @@ def resolve_stream(
             LOG.debug("Playlist ID %s had no HLS stream", playlist_id)
             continue
 
-        title = clean_text(best_title(page.title, playlist_title(playlist)))
+        clip_title = dict(page.news_clips).get(playlist_id)
+        title = clip_title or clean_text(best_title(page.title, playlist_title(playlist)))
         date = first_non_empty(page.date, playlist_date(playlist))
         stem = build_filename_stem(filename_template, title=title, date=date, id=playlist_id)
 
         return StreamInfo(
             page=page,
             playlist_id=playlist_id,
-            playlist_url=GETPLAYLIST_URL.format(id=playlist_id),
+            playlist_url=(NEWS_PLAYLIST_URL if news else GETPLAYLIST_URL).format(id=playlist_id),
             stream_url=stream_url,
             title=title,
             date=date,

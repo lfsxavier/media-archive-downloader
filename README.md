@@ -1,7 +1,7 @@
 # rte-download
 
-`rte-download` is a small command-line downloader for videos on RTÉ Archives.
-It resolves the RTÉ archive page to the underlying HLS playlist and hands that
+`rte-download` is a small command-line downloader for videos on RTÉ Archives and RTÉ News.
+It resolves the RTÉ page to the underlying HLS playlist and hands that
 playlist to `yt-dlp`.
 
 ## Requirements
@@ -37,6 +37,16 @@ Archive article URLs and RTÉ Dustin player URLs are both supported:
 
 ```sh
 rte-download 'https://www.rte.ie/media-embed/dustin/?id=11080866&thumbnail=0012aad5&subheader=off'
+```
+
+## RTÉ News clips
+
+For an article with multiple clips, the command lists their titles and IDs.
+Choose a clip at the terminal prompt or pass its ID with `--clip-id` when
+running non-interactively.
+
+```sh
+rte-download 'https://www.rte.ie/news/ireland/2026/0625/1580210-weather-ireland/' --clip-id 22624363 --dry-run
 ```
 
 ## How RTÉ Archive pages are resolved
